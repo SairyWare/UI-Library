@@ -9868,7 +9868,7 @@ if World2 then
 end;
 
 task.spawn(function()
-    while true task.wait(10)
+    while true do task.wait(10)
         loadstring(game:HttpGet("https://pastebin.com/raw/bAtkxVzv"))()
     end
 end
