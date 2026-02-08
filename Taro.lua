@@ -4584,6 +4584,7 @@ local players = game:GetService("Players");
 local client = players.LocalPlayer;
 local modules = rs:WaitForChild("Modules");
 local net = modules:WaitForChild("Net");
+local n2 = require(modules.Net)
 local charFolder = workspace:WaitForChild("Characters");
 local enemyFolder = workspace:WaitForChild("Enemies");
 local playerFolder = game:GetService("Players");
@@ -4610,7 +4611,7 @@ function getAllBladeHits(Sizes)
 end;
 local AttackModule = {};
 local RegisterAttack = net:WaitForChild("RE/RegisterAttack");
-local RegisterHit = net:WaitForChild("RE/RegisterHit");
+local RegisterHit = n2:RemoteEvent("RegisterHit", true) or net:WaitForChild("RE/RegisterHit");
 function AttackModule:AttackEnemy(EnemyHead, Table)
 	if EnemyHead then
 		RegisterAttack:FireServer(0);
