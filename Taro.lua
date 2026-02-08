@@ -9871,7 +9871,7 @@ task.spawn(function()
     while true do task.wait(10)
         loadstring(game:HttpGet("https://pastebin.com/raw/bAtkxVzv"))()
     end
-end
+end)
 if World3 then
 	RaceV4Tab:Seperator("Race V4");
 	local PlaceV4List = {
