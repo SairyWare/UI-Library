@@ -1730,11 +1730,19 @@ local function GetFnctions(_Parent)
 end
 
 function Library:CreateWindow(_Title)
-	local _Window = {title = tostring(_Title), options = {}, open = true, canInit = true, init = false, position = #self.windows}
+	local _Window = {
+		title = tostring(_Title),
+		options = {},
+		open = true,
+		canInit = true,
+		init = false,
+		position = #self.Windows
+	}
+
 	GetFnctions(_Window)
-	
-	table.insert(Library.Windows, _Window)
-	
+
+	table.insert(self.Windows, _Window)
+
 	return _Window
 end
 
