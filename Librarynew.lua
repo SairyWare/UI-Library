@@ -1764,7 +1764,7 @@ function Library:Init()
 	self.base.Name = "Alert3z"
 	
 	
-	for _, window in next, self.windows do
+	for _, window in next, self.Windows do
 		if window.canInit and not window.init then
 			window.init = true
 			CreateOptionHolder(window.title, self.base, window)
@@ -1780,7 +1780,7 @@ function Library:Close()
 	if self.activePopup then
 		self.activePopup:Close()
 	end
-	for _, window in next, self.windows do
+	for _, window in next, self.Windows do
 		if window.main then
 			window.main.Visible = self.open
 		end
