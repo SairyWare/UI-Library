@@ -1,6 +1,3 @@
--- ============================================================ --
---  GAG2 UI LIBRARY  (ModuleScript: GAG2_UILib)                 --
--- ============================================================ --
 local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local Players          = game:GetService("Players")
@@ -77,14 +74,14 @@ end
 
 -- ================================================================== CONFIG
 
-local CFG_KEY = "__GAG2HUB_CFG"
+local CFG_KEY = "__SAIRYWARE_CFG"
 _G[CFG_KEY] = _G[CFG_KEY] or {}
 local Cfg = _G[CFG_KEY]
 
 local DefaultSave = {
 	enabled = true,
-	Folder  = "GAG2Hub",
-	File    = "Config",
+	Folder  = "Sairy Ware",
+	File    = "Sairy_Config",
 }
 
 local function GetFilePath( _SS )
@@ -175,7 +172,7 @@ end
 
 -- ================================================================== WINDOW
 
-function UILib.newWindow( _Title, _Subtitle, _SaveSetting )
+function UILib.Window( _Title, _Subtitle, _SaveSetting )
 	local self   = setmetatable({}, UILib)
 	self._tabs   = {}
 	self._pages  = {}
@@ -190,11 +187,11 @@ function UILib.newWindow( _Title, _Subtitle, _SaveSetting )
 
 	LoadFromFile(_SS)
 
-	local _Old = GetParentGui():FindFirstChild("GAG2Hub")
+	local _Old = GetParentGui():FindFirstChild("SairyHub")
 	if _Old then _Old:Destroy() end
 
 	local _Gui = Instance.new("ScreenGui")
-	_Gui.Name           = "GAG2Hub"
+	_Gui.Name           = "SairyHub"
 	_Gui.ResetOnSpawn   = false
 	_Gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	_Gui.IgnoreGuiInset = true
@@ -283,7 +280,7 @@ function UILib.newWindow( _Title, _Subtitle, _SaveSetting )
 	_CloseBtn.AutoButtonColor  = true
 	_CloseBtn.Parent           = _Bar
 	Corner(_CloseBtn, 6)
-	_CloseBtn.MouseButton1Click:Connect(function() self:hide() end)
+	_CloseBtn.MouseButton1Click:Connect(function() self:Hide() end)
 
 	-- ── drag ───────────────────────────────────────────────────
 	do
@@ -336,7 +333,7 @@ function UILib.newWindow( _Title, _Subtitle, _SaveSetting )
 	-- ── INSERT hotkey ──────────────────────────────────────────
 	UserInputService.InputBegan:Connect(function(_Input, _GameProcessed)
 		if _GameProcessed then return end
-		if _Input.KeyCode == Enum.KeyCode.Insert then self:toggle() end
+		if _Input.KeyCode == Enum.KeyCode.Insert then self:Toggle() end
 	end)
 
 	-- intro tween
@@ -356,7 +353,7 @@ function UILib:_ord( )
 	return self._lo
 end
 
-function UILib:selectTab( _Name )
+function UILib:SelectTab(_Name)
 	for _N, _Pg in pairs(self._pages) do _Pg.Visible = (_N == _Name) end
 	for _N, _Btn in pairs(self._tabs) do
 		local _On = (_N == _Name)
@@ -368,7 +365,7 @@ function UILib:selectTab( _Name )
 	CfgSet("__activeTab", _Name, self._ss)
 end
 
-function UILib:addTab( _Name )
+function UILib:AddTab( _Name )
 	local _Btn = Instance.new("TextButton")
 	_Btn.Size             = UDim2.new(1, 0, 0, 34)
 	_Btn.BackgroundColor3 = C.CARD
@@ -394,7 +391,7 @@ function UILib:addTab( _Name )
 	return _Page
 end
 
-function UILib:restoreTab( _Fallback )
+function UILib:RestoreTab( _Fallback )
 	local _Saved = Cfg["__activeTab"]
 	if _Saved and self._pages[_Saved] then
 		self:selectTab(_Saved)
@@ -403,14 +400,14 @@ function UILib:restoreTab( _Fallback )
 	if _Fallback then self:selectTab(_Fallback) end
 end
 
-function UILib:show( )   self._main.Visible = true  end
-function UILib:hide( )   self._main.Visible = false end
-function UILib:toggle( ) self._main.Visible = not self._main.Visible end
-function UILib:destroy( ) if self._gui then self._gui:Destroy() end end
+function UILib:Show( )   self._main.Visible = true  end
+function UILib:Hide( )   self._main.Visible = false end
+function UILib:Toggle( ) self._main.Visible = not self._main.Visible end
+function UILib:Destroy( ) if self._gui then self._gui:Destroy() end end
 
 -- ================================================================== WIDGETS
 
-function UILib:sectionLabel( _Parent, _Text )
+function UILib:SectionLabel( _Parent, _Text )
 	local _Lbl = Instance.new("TextLabel")
 	_Lbl.Size                = UDim2.new(1, 0, 0, 18)
 	_Lbl.LayoutOrder         = self:_ord()
@@ -425,7 +422,7 @@ function UILib:sectionLabel( _Parent, _Text )
 end
 
 -- ── toggleRow ─────────────────────────────────────────────────────────────
-function UILib:toggleRow( _Parent, _Label, _Source, _Key, _CfgKey, _OnChange )
+function UILib:ToggleRow( _Parent, _Label, _Source, _Key, _CfgKey, _OnChange )
 	if _CfgKey then
 		local _Saved = Cfg[_CfgKey]
 		if _Saved ~= nil then _Source[_Key] = _Saved end
@@ -487,7 +484,7 @@ function UILib:toggleRow( _Parent, _Label, _Source, _Key, _CfgKey, _OnChange )
 end
 
 -- ── buttonRow ─────────────────────────────────────────────────────────────
-function UILib:buttonRow( _Parent, _Label, _BtnText, _Callback, _CfgKey )
+function UILib:ButtonRow( _Parent, _Label, _BtnText, _Callback, _CfgKey )
 	local _Row = Instance.new("Frame")
 	_Row.Size             = UDim2.new(1, 0, 0, 40)
 	_Row.LayoutOrder      = self:_ord()
@@ -528,7 +525,7 @@ function UILib:buttonRow( _Parent, _Label, _BtnText, _Callback, _CfgKey )
 end
 
 -- ── statusCard ────────────────────────────────────────────────────────────
-function UILib:statusCard( _Parent, _Height )
+function UILib:StatusCard( _Parent, _Height )
 	local _Card = Instance.new("Frame")
 	_Card.Size             = UDim2.new(1, 0, 0, _Height or 110)
 	_Card.LayoutOrder      = self:_ord()
@@ -554,7 +551,7 @@ end
 
 -- ================================================================== CHECKLIST
 
-function UILib:checklist( _Parent, _Names, _Store, _CfgKey, _Opts )
+function UILib:Checklist( _Parent, _Names, _Store, _CfgKey, _Opts )
 	_Opts = _Opts or {}
 	local _Multi  = _Opts.multiSelect ~= false
 	local _Height = _Opts.height or 180
