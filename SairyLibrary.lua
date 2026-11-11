@@ -9,6 +9,7 @@ local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -224,7 +225,7 @@ local BuiltInThemes = {
 }
 
 local SairyColors = {}
-for Key, Value in pairs(BuiltInThemes["Sairy Blue"]) do
+for Key, Value in pairs(BuiltInThemes["Revolution"]) do
     SairyColors[Key] = Value
 end
 
@@ -243,7 +244,7 @@ local SairyAssets = {
 local SairyLib = {
     ActiveWindows = {},
     Themes = BuiltInThemes,
-    ThemeName = "Sairy Blue",
+    ThemeName = "Revolution",
     ThemeChangeListeners = {},
     TweenTime = 0.22
 }
@@ -407,6 +408,118 @@ local function SafeCallback(Callback, ...)
     end
 end
 
+local function HasFileApi()
+    return type(writefile) == "function"
+        and type(readfile) == "function"
+        and type(isfile) == "function"
+        and type(isfolder) == "function"
+        and type(makefolder) == "function"
+end
+
+local function NormalizeFolderPath(RawFolder, Fallback)
+    if type(RawFolder) ~= "string" then
+        return Fallback
+    end
+    local Cleaned = RawFolder:gsub("\\", "/"):gsub("[<>:\"|?*]", ""):gsub("^/+", ""):gsub("/+$", ""):gsub("/+", "/")
+    Cleaned = Cleaned:gsub("^%s*(.-)%s*$", "%1")
+    if Cleaned == "" or Cleaned:find("%.%.") then
+        return Fallback
+    end
+    return Cleaned
+end
+
+local function NormalizeFileName(RawFile, Fallback)
+    if type(RawFile) ~= "string" then
+        return Fallback
+    end
+    local Cleaned = RawFile:gsub("[\\/<>:\"|?*]", ""):gsub("%.json$", "")
+    Cleaned = Cleaned:gsub("^%s*(.-)%s*$", "%1")
+    if Cleaned == "" or Cleaned:find("%.%.") then
+        return Fallback
+    end
+    return Cleaned
+end
+
+local function EnsureFolderPath(FolderPath)
+    if type(FolderPath) ~= "string" or FolderPath == "" then
+        return false
+    end
+    local Parts = FolderPath:split("/")
+    local Current = ""
+    for _, Part in ipairs(Parts) do
+        if Part ~= "" then
+            Current = (Current == "") and Part or (Current .. "/" .. Part)
+            local OkCheck, Exists = pcall(isfolder, Current)
+            if not OkCheck then
+                return false
+            end
+            if not Exists then
+                local OkMake = pcall(makefolder, Current)
+                if not OkMake then
+                    return false
+                end
+            end
+        end
+    end
+    return true
+end
+
+local function DeepCloneValue(Value, Seen)
+    if type(Value) ~= "table" then
+        return Value
+    end
+    Seen = Seen or {}
+    if Seen[Value] then
+        return Seen[Value]
+    end
+    local Copy = {}
+    Seen[Value] = Copy
+    for Key, Val in pairs(Value) do
+        Copy[DeepCloneValue(Key, Seen)] = DeepCloneValue(Val, Seen)
+    end
+    return Copy
+end
+
+local function DeepEqual(Left, Right, Seen)
+    if Left == Right then
+        return true
+    end
+    if type(Left) ~= "table" or type(Right) ~= "table" then
+        return false
+    end
+    Seen = Seen or {}
+    local PairKey = tostring(Left) .. "|" .. tostring(Right)
+    if Seen[PairKey] then
+        return true
+    end
+    Seen[PairKey] = true
+    for Key, Val in pairs(Left) do
+        if not DeepEqual(Val, Right[Key], Seen) then
+            return false
+        end
+    end
+    for Key in pairs(Right) do
+        if Left[Key] == nil then
+            return false
+        end
+    end
+    return true
+end
+
+local function ResolveKeyCode(RawKey)
+    if typeof(RawKey) == "EnumItem" and RawKey.EnumType == Enum.KeyCode and RawKey ~= Enum.KeyCode.Unknown then
+        return RawKey
+    elseif type(RawKey) == "string" and RawKey ~= "" and RawKey ~= "Unknown" then
+        local OkEnum, Resolved = pcall(function()
+            return Enum.KeyCode[RawKey]
+        end)
+        if OkEnum and typeof(Resolved) == "EnumItem" and Resolved.EnumType == Enum.KeyCode and Resolved ~= Enum.KeyCode.Unknown then
+            return Resolved
+        end
+    end
+    return nil
+end
+
 function SairyLib:CreateWindow(WindowConfig)
     WindowConfig = WindowConfig or {}
     if WindowConfig.Theme then
@@ -433,6 +546,284 @@ function SairyLib:CreateWindow(WindowConfig)
     local function TrackConnection(Connection)
         table.insert(Connections, Connection)
         return Connection
+    end
+
+    -- =========================================================================
+    -- Configuration System (Flag Registry + JSON File API + AutoLoad/AutoSave)
+    -- =========================================================================
+    local DefaultConfigFolder = "SairyWare"
+    local DefaultConfigFile = "Configs"
+    local RawSaveConfigs = WindowConfig.EnabledSaveConfigs
+    local ConfigEnabled = false
+    local ConfigFolderName = DefaultConfigFolder
+    local ConfigFileName = DefaultConfigFile
+    local AutoLoadEnabled = false
+    local AutoSaveEnabled = false
+    local AutoSaveDebounce = 0.25
+
+    if RawSaveConfigs == true then
+        ConfigEnabled = true
+        AutoLoadEnabled = true
+        AutoSaveEnabled = true
+    elseif type(RawSaveConfigs) == "table" then
+        ConfigEnabled = RawSaveConfigs.Enabled ~= false
+        ConfigFolderName = NormalizeFolderPath(RawSaveConfigs.FolderName, DefaultConfigFolder)
+        ConfigFileName = NormalizeFileName(RawSaveConfigs.FileName, DefaultConfigFile)
+        if ConfigEnabled then
+            AutoLoadEnabled = RawSaveConfigs.AutoLoad ~= false
+            AutoSaveEnabled = RawSaveConfigs.AutoSave ~= false
+        end
+        if type(RawSaveConfigs.Debounce) == "number" and RawSaveConfigs.Debounce >= 0.05 then
+            AutoSaveDebounce = RawSaveConfigs.Debounce
+        end
+    end
+
+    local ConfigRegistry = {}
+    local ConfigFlagOrder = {}
+    local ApplyingFlags = {}
+    local IsLoadingConfig = false
+    local AutoSaveToken = 0
+    local AutoSavePending = false
+    local LoadedConfigSnapshot = nil
+    local AppliedSnapshotFlags = {}
+
+    local function GetConfigPath(CustomFileName)
+        local TargetName = CustomFileName and NormalizeFileName(CustomFileName, "") or ConfigFileName
+        if TargetName == "" then
+            return nil, nil
+        end
+        return ConfigFolderName .. "/" .. TargetName .. ".json", TargetName
+    end
+
+    local function ReadConfigTable(TargetPath)
+        if not HasFileApi() then
+            return nil, "File API unavailable"
+        end
+        local OkExists, Exists = pcall(isfile, TargetPath)
+        if not OkExists or not Exists then
+            return nil, "File not found"
+        end
+        local OkRead, Content = pcall(readfile, TargetPath)
+        if not OkRead or type(Content) ~= "string" then
+            return nil, "Failed to read config file"
+        end
+        if Content:gsub("^%s*(.-)%s*$", "%1") == "" then
+            return nil, "Config file is empty"
+        end
+        local OkDecode, Decoded = pcall(function()
+            return HttpService:JSONDecode(Content)
+        end)
+        if not OkDecode or type(Decoded) ~= "table" or #Decoded > 0 then
+            return nil, "Corrupted JSON config data"
+        end
+        return Decoded, nil
+    end
+
+    local function CollectCurrentConfigData()
+        local Data = {}
+        for _, Flag in ipairs(ConfigFlagOrder) do
+            local Entry = ConfigRegistry[Flag]
+            if Entry and Entry.Serialize then
+                local OkSer, Val = pcall(Entry.Serialize)
+                if OkSer and Val ~= nil then
+                    Data[Flag] = DeepCloneValue(Val)
+                end
+            end
+        end
+        return Data
+    end
+
+    local function ExecuteSaveConfig(CustomFileName)
+        if not ConfigEnabled then
+            return false, "Config system is disabled"
+        end
+        if not HasFileApi() then
+            warn("[SairyLib] File API unavailable for SaveConfig.")
+            return false, "File API unavailable"
+        end
+        local TargetPath = GetConfigPath(CustomFileName)
+        if not TargetPath then
+            return false, "Invalid config file name"
+        end
+
+        AutoSaveToken += 1
+        AutoSavePending = false
+
+        local CurrentData = CollectCurrentConfigData()
+        local ExistingTable = nil
+        local OkExists, Exists = pcall(isfile, TargetPath)
+        if OkExists and Exists then
+            ExistingTable = ReadConfigTable(TargetPath)
+        end
+
+        local OutputTable
+        if ExistingTable then
+            local HasChanges = false
+            OutputTable = DeepCloneValue(ExistingTable)
+            for _, Flag in ipairs(ConfigFlagOrder) do
+                local NewVal = CurrentData[Flag]
+                if NewVal ~= nil and not DeepEqual(ExistingTable[Flag], NewVal) then
+                    OutputTable[Flag] = DeepCloneValue(NewVal)
+                    HasChanges = true
+                end
+            end
+            if not HasChanges then
+                return true, "No changes"
+            end
+        else
+            OutputTable = DeepCloneValue(CurrentData)
+        end
+
+        if not EnsureFolderPath(ConfigFolderName) then
+            warn("[SairyLib] Failed to create config folder: " .. tostring(ConfigFolderName))
+            return false, "Failed to create folder"
+        end
+
+        local OkEncode, JsonText = pcall(function()
+            return HttpService:JSONEncode(OutputTable)
+        end)
+        if not OkEncode or type(JsonText) ~= "string" then
+            warn("[SairyLib] Failed to encode config JSON: " .. tostring(JsonText))
+            return false, "JSON encode failed"
+        end
+
+        local OkWrite, WriteErr = pcall(writefile, TargetPath, JsonText)
+        if not OkWrite then
+            warn("[SairyLib] Failed to write config file: " .. tostring(WriteErr))
+            return false, tostring(WriteErr)
+        end
+        return true
+    end
+
+    local function ExecuteLoadConfig(CustomFileName)
+        if not ConfigEnabled then
+            return false, "Config system is disabled"
+        end
+        if not HasFileApi() then
+            warn("[SairyLib] File API unavailable for LoadConfig.")
+            return false, "File API unavailable"
+        end
+        local TargetPath = GetConfigPath(CustomFileName)
+        if not TargetPath then
+            return false, "Invalid config file name"
+        end
+
+        AutoSaveToken += 1
+        AutoSavePending = false
+
+        local LoadedTable, ReadErr = ReadConfigTable(TargetPath)
+        if not LoadedTable then
+            if ReadErr ~= "File not found" then
+                warn("[SairyLib] Failed to load config (" .. TargetPath .. "): " .. tostring(ReadErr))
+            end
+            return false, ReadErr
+        end
+
+        IsLoadingConfig = true
+        table.clear(AppliedSnapshotFlags)
+        LoadedConfigSnapshot = DeepCloneValue(LoadedTable)
+
+        local ApplyOk, ApplyErr = pcall(function()
+            for _, Flag in ipairs(ConfigFlagOrder) do
+                local Entry = ConfigRegistry[Flag]
+                local RawVal = LoadedTable[Flag]
+                if Entry and RawVal ~= nil then
+                    local OkApply, ApplyRes = pcall(Entry.Apply, RawVal, true)
+                    AppliedSnapshotFlags[Flag] = true
+                    if not OkApply then
+                        warn(string.format("[SairyLib] Failed to apply config Flag '%s': %s", Flag, tostring(ApplyRes)))
+                    end
+                end
+            end
+        end)
+        IsLoadingConfig = false
+
+        if not ApplyOk then
+            warn("[SairyLib] LoadConfig error: " .. tostring(ApplyErr))
+            return false, tostring(ApplyErr)
+        end
+        return true
+    end
+
+    local function ScheduleAutoSave()
+        if Destroyed or not ConfigEnabled or not AutoSaveEnabled or IsLoadingConfig then
+            return
+        end
+        AutoSaveToken += 1
+        local MyToken = AutoSaveToken
+        AutoSavePending = true
+        task.delay(AutoSaveDebounce, function()
+            if Destroyed or not ConfigEnabled or not AutoSaveEnabled or IsLoadingConfig or AutoSaveToken ~= MyToken then
+                return
+            end
+            AutoSavePending = false
+            ExecuteSaveConfig()
+        end)
+    end
+
+    local function NotifyConfigChange(Flag)
+        if Destroyed or not ConfigEnabled or IsLoadingConfig then
+            return
+        end
+        if Flag and ApplyingFlags[Flag] then
+            return
+        end
+        ScheduleAutoSave()
+    end
+
+    local function RunFlagCallback(Flag, Callback, ...)
+        local ArgCount = select("#", ...)
+        local Args = { ... }
+        if Flag and Flag ~= "" then
+            if ApplyingFlags[Flag] then
+                return
+            end
+            ApplyingFlags[Flag] = true
+            local Ok, Err = pcall(function()
+                Callback(table.unpack(Args, 1, ArgCount))
+            end)
+            ApplyingFlags[Flag] = nil
+            if not Ok then
+                warn("[SairyLib] Callback error:", Err)
+            end
+        else
+            SafeCallback(Callback, table.unpack(Args, 1, ArgCount))
+        end
+    end
+
+    local function RegisterConfigElement(Flag, ElementSpec)
+        if type(Flag) ~= "string" or Flag == "" then
+            return false
+        end
+        if ConfigRegistry[Flag] then
+            warn(string.format("[SairyLib] Duplicate Flag '%s' ignored.", Flag))
+            return false
+        end
+        ConfigRegistry[Flag] = ElementSpec
+        table.insert(ConfigFlagOrder, Flag)
+
+        if ConfigEnabled and AutoLoadEnabled and LoadedConfigSnapshot and not AppliedSnapshotFlags[Flag] then
+            local LateVal = LoadedConfigSnapshot[Flag]
+            if LateVal ~= nil then
+                AppliedSnapshotFlags[Flag] = true
+                local WasLoading = IsLoadingConfig
+                IsLoadingConfig = true
+                local OkApply, ApplyErr = pcall(ElementSpec.Apply, LateVal, true)
+                IsLoadingConfig = WasLoading
+                if not OkApply then
+                    warn(string.format("[SairyLib] Late AutoLoad Flag '%s' failed: %s", Flag, tostring(ApplyErr)))
+                end
+            end
+        end
+        return true
+    end
+
+    if ConfigEnabled then
+        task.defer(function()
+            if not Destroyed and ConfigEnabled and AutoLoadEnabled then
+                ExecuteLoadConfig()
+            end
+        end)
     end
 
     local ThemeBindings = {}
@@ -1294,6 +1685,200 @@ function SairyLib:CreateWindow(WindowConfig)
         return SairyLib:GetThemes()
     end
 
+    function WindowHandler:SaveConfig(CustomFileName)
+        return ExecuteSaveConfig(CustomFileName)
+    end
+
+    function WindowHandler:LoadConfig(CustomFileName)
+        return ExecuteLoadConfig(CustomFileName)
+    end
+
+    function WindowHandler:SetAutoSave(State)
+        if not ConfigEnabled then
+            return false
+        end
+        AutoSaveEnabled = State == true
+        if not AutoSaveEnabled then
+            AutoSaveToken += 1
+            AutoSavePending = false
+        end
+        return true
+    end
+
+    function WindowHandler:SetAutoLoad(State)
+        if not ConfigEnabled then
+            return false
+        end
+        AutoLoadEnabled = State == true
+        return true
+    end
+
+    function WindowHandler:CreateConfig(ConfigName)
+        if not ConfigEnabled then
+            return false, "Config system is disabled"
+        end
+        if not HasFileApi() then
+            return false, "File API unavailable"
+        end
+        local CleanName = NormalizeFileName(ConfigName, "")
+        if CleanName == "" then
+            return false, "Invalid config file name"
+        end
+        local TargetPath = ConfigFolderName .. "/" .. CleanName .. ".json"
+        local OkExists, Exists = pcall(isfile, TargetPath)
+        if OkExists and Exists then
+            return false, "Config already exists"
+        end
+        ConfigFileName = CleanName
+        LoadedConfigSnapshot = nil
+        table.clear(AppliedSnapshotFlags)
+        return ExecuteSaveConfig(CleanName)
+    end
+
+    function WindowHandler:SelectConfig(ConfigName, ShouldLoad)
+        if not ConfigEnabled then
+            return false, "Config system is disabled"
+        end
+        local CleanName = NormalizeFileName(ConfigName, "")
+        if CleanName == "" then
+            return false, "Invalid config file name"
+        end
+        ConfigFileName = CleanName
+        LoadedConfigSnapshot = nil
+        table.clear(AppliedSnapshotFlags)
+        if ShouldLoad == true or (ShouldLoad == nil and AutoLoadEnabled) then
+            if HasFileApi() then
+                local TargetPath = ConfigFolderName .. "/" .. CleanName .. ".json"
+                local OkExists, Exists = pcall(isfile, TargetPath)
+                if OkExists and Exists then
+                    return ExecuteLoadConfig(CleanName)
+                end
+            end
+        end
+        return true
+    end
+
+    function WindowHandler:RenameConfig(OldName, NewName)
+        if not ConfigEnabled then
+            return false, "Config system is disabled"
+        end
+        if not HasFileApi() then
+            return false, "File API unavailable"
+        end
+        local OldClean = NormalizeFileName(OldName, "")
+        local NewClean = NormalizeFileName(NewName, "")
+        if OldClean == "" or NewClean == "" then
+            return false, "Invalid config file name"
+        end
+        if OldClean == NewClean then
+            return true
+        end
+        local OldPath = ConfigFolderName .. "/" .. OldClean .. ".json"
+        local NewPath = ConfigFolderName .. "/" .. NewClean .. ".json"
+        local OkOld, OldExists = pcall(isfile, OldPath)
+        if not OkOld or not OldExists then
+            return false, "Source config not found"
+        end
+        local OkNew, NewExists = pcall(isfile, NewPath)
+        if OkNew and NewExists then
+            return false, "Destination config already exists"
+        end
+        local OkRead, RawContent = pcall(readfile, OldPath)
+        if not OkRead or type(RawContent) ~= "string" then
+            return false, "Failed to read source config"
+        end
+        local OkWrite, WriteErr = pcall(writefile, NewPath, RawContent)
+        if not OkWrite then
+            return false, tostring(WriteErr)
+        end
+        if type(delfile) == "function" then
+            pcall(delfile, OldPath)
+        end
+        if ConfigFileName == OldClean then
+            ConfigFileName = NewClean
+        end
+        return true
+    end
+
+    function WindowHandler:DeleteConfig(ConfigName)
+        if not ConfigEnabled then
+            return false, "Config system is disabled"
+        end
+        if not HasFileApi() or type(delfile) ~= "function" then
+            return false, "Delete API unavailable"
+        end
+        local CleanName = NormalizeFileName(ConfigName, "")
+        if CleanName == "" then
+            return false, "Invalid config file name"
+        end
+        local TargetPath = ConfigFolderName .. "/" .. CleanName .. ".json"
+        local OkExists, Exists = pcall(isfile, TargetPath)
+        if not OkExists or not Exists then
+            return false, "Config not found"
+        end
+        local OkDel, DelErr = pcall(delfile, TargetPath)
+        if not OkDel then
+            return false, tostring(DelErr)
+        end
+        if ConfigFileName == CleanName then
+            LoadedConfigSnapshot = nil
+            table.clear(AppliedSnapshotFlags)
+        end
+        return true
+    end
+
+    function WindowHandler:GetConfigs()
+        if not ConfigEnabled or not HasFileApi() then
+            return {}
+        end
+        local Results = {}
+        if type(listfiles) == "function" then
+            local OkFolder, FolderExists = pcall(isfolder, ConfigFolderName)
+            if OkFolder and FolderExists then
+                local OkList, FileList = pcall(listfiles, ConfigFolderName)
+                if OkList and type(FileList) == "table" then
+                    for _, FullPath in ipairs(FileList) do
+                        local BaseName = tostring(FullPath):match("([^/\\]+)$") or ""
+                        local Stem = BaseName:match("^(.*)%.json$")
+                        if Stem and Stem ~= "" then
+                            table.insert(Results, Stem)
+                        end
+                    end
+                    table.sort(Results)
+                end
+            end
+        else
+            local ActivePath = GetConfigPath()
+            if ActivePath then
+                local OkExists, Exists = pcall(isfile, ActivePath)
+                if OkExists and Exists then
+                    table.insert(Results, ConfigFileName)
+                end
+            end
+        end
+        return Results
+    end
+
+    function WindowHandler:GetFlag(Flag)
+        local Entry = ConfigRegistry[Flag]
+        if Entry and Entry.Get then
+            return Entry.Get()
+        end
+        return nil
+    end
+
+    function WindowHandler:GetConfigInfo()
+        return {
+            Enabled = ConfigEnabled,
+            FolderName = ConfigFolderName,
+            FileName = ConfigFileName,
+            FilePath = GetConfigPath(),
+            AutoLoad = AutoLoadEnabled,
+            AutoSave = AutoSaveEnabled,
+            Flags = table.clone(ConfigFlagOrder)
+        }
+    end
+
     function WindowHandler:Notify(NotifyConfig)
         NotifyConfig = NotifyConfig or {}
         local Title = NotifyConfig.Title or "Notice"
@@ -1498,7 +2083,19 @@ function SairyLib:CreateWindow(WindowConfig)
 
     function WindowHandler:Destroy()
         if Destroyed then return end
+        if ConfigEnabled and AutoSaveEnabled and AutoSavePending then
+            AutoSaveToken += 1
+            AutoSavePending = false
+            pcall(ExecuteSaveConfig)
+        end
         Destroyed = true
+        AutoSaveToken += 1
+        AutoSavePending = false
+        table.clear(ConfigRegistry)
+        table.clear(ConfigFlagOrder)
+        table.clear(ApplyingFlags)
+        table.clear(AppliedSnapshotFlags)
+        LoadedConfigSnapshot = nil
         for Index, Listener in ipairs(SairyLib.ThemeChangeListeners) do
             if Listener == ThemeListener then
                 table.remove(SairyLib.ThemeChangeListeners, Index)
@@ -1887,8 +2484,11 @@ function SairyLib:CreateWindow(WindowConfig)
             ToggleConfig = ToggleConfig or {}
             local Title = ToggleConfig.Title or "Toggle"
             local Desc = ToggleConfig.Desc or ""
-            local State = ToggleConfig.Default or false
+            local Flag = ToggleConfig.Flag
+            local DefaultState = ToggleConfig.Default == true
+            local State = DefaultState
             local Callback = ToggleConfig.Callback or function() end
+            local InitialLoadHandled = false
 
             local ToggleCard = Instance.new("TextButton")
             ToggleCard.Name = Title
@@ -1997,37 +2597,82 @@ function SairyLib:CreateWindow(WindowConfig)
                 end
             end)
 
-            local function UpdateVisual(NewState)
-                if NewState then
-                    Tween(SwitchTrack, { BackgroundColor3 = SairyColors.Accent }, 0.18)
-                    Tween(SwitchKnob, { Position = UDim2.new(1, -21, 0.5, 0), BackgroundColor3 = GetKnobActiveColor() }, 0.18, Enum.EasingStyle.Back)
-                    Tween(TrackGlow, { ImageTransparency = 0.55 }, 0.22)
+            local function UpdateVisual(NewState, Instant)
+                local TargetTrack = NewState and SairyColors.Accent or SairyColors.MutedDark
+                local TargetKnobPos = NewState and UDim2.new(1, -21, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)
+                local TargetKnobColor = NewState and GetKnobActiveColor() or SairyColors.TextSecondary
+                local TargetGlow = NewState and 0.55 or 1
+                if Instant then
+                    SwitchTrack.BackgroundColor3 = TargetTrack
+                    SwitchKnob.Position = TargetKnobPos
+                    SwitchKnob.BackgroundColor3 = TargetKnobColor
+                    TrackGlow.ImageTransparency = TargetGlow
+                elseif NewState then
+                    Tween(SwitchTrack, { BackgroundColor3 = TargetTrack }, 0.18)
+                    Tween(SwitchKnob, { Position = TargetKnobPos, BackgroundColor3 = TargetKnobColor }, 0.18, Enum.EasingStyle.Back)
+                    Tween(TrackGlow, { ImageTransparency = TargetGlow }, 0.22)
                 else
-                    Tween(SwitchTrack, { BackgroundColor3 = SairyColors.MutedDark }, 0.18)
-                    Tween(SwitchKnob, { Position = UDim2.new(0, 3, 0.5, 0), BackgroundColor3 = SairyColors.TextSecondary }, 0.18)
-                    Tween(TrackGlow, { ImageTransparency = 1 }, 0.18)
+                    Tween(SwitchTrack, { BackgroundColor3 = TargetTrack }, 0.18)
+                    Tween(SwitchKnob, { Position = TargetKnobPos, BackgroundColor3 = TargetKnobColor }, 0.18)
+                    Tween(TrackGlow, { ImageTransparency = TargetGlow }, 0.18)
                 end
             end
 
             local function SetState(NewState)
+                if Flag and ApplyingFlags[Flag] then
+                    return
+                end
+                local PrevState = State
                 State = NewState == true
+                InitialLoadHandled = true
                 UpdateVisual(State)
-                SafeCallback(Callback, State)
+                RunFlagCallback(Flag, Callback, State)
+                if PrevState ~= State and not IsLoadingConfig then
+                    NotifyConfigChange(Flag)
+                end
             end
 
-            if State then
-                task.defer(SafeCallback, Callback, State)
+            RegisterConfigElement(Flag, {
+                Type = "Toggle",
+                Get = function() return State end,
+                Serialize = function() return State end,
+                GetDefault = function() return DefaultState end,
+                Apply = function(LoadedVal, FireCallback)
+                    if type(LoadedVal) ~= "boolean" then
+                        return false
+                    end
+                    InitialLoadHandled = true
+                    State = LoadedVal
+                    UpdateVisual(State, true)
+                    if FireCallback ~= false then
+                        RunFlagCallback(Flag, Callback, State)
+                    end
+                    return true
+                end
+            })
+
+            if State and not InitialLoadHandled then
+                task.defer(function()
+                    if not Destroyed and not InitialLoadHandled and State then
+                        RunFlagCallback(Flag, Callback, State)
+                    end
+                end)
             end
 
             ToggleCard.MouseButton1Click:Connect(function()
                 SetState(not State)
             end)
 
-            return {
-                Set = SetState,
+            local ToggleHandle
+            ToggleHandle = {
+                Set = function(FirstArg, SecondArg)
+                    local TargetVal = (FirstArg == ToggleHandle) and SecondArg or FirstArg
+                    SetState(TargetVal)
+                end,
                 Get = function() return State end,
                 Instance = ToggleCard
             }
+            return ToggleHandle
         end
 
         -- SairyLib Slider (Exact 88px Card + Click-to-Type Value Badge + Track Glow)
@@ -2035,11 +2680,13 @@ function SairyLib:CreateWindow(WindowConfig)
             SliderConfig = SliderConfig or {}
             local Title = SliderConfig.Title or "Slider"
             local Desc = SliderConfig.Desc or ""
+            local Flag = SliderConfig.Flag
             local Min = SliderConfig.Min or 0
             local Max = SliderConfig.Max or 100
             local Step = SliderConfig.Increment or SliderConfig.Step or 1
             local Suffix = SliderConfig.Suffix or ""
-            local CurrentValue = math.clamp(SliderConfig.Default or Min, Min, Max)
+            local DefaultVal = math.clamp(SliderConfig.Default or Min, Min, Max)
+            local CurrentValue = DefaultVal
             local Callback = SliderConfig.Callback or function() end
 
             local SliderCard = Instance.new("Frame")
@@ -2189,24 +2836,42 @@ function SairyLib:CreateWindow(WindowConfig)
                 return math.round(Clamped)
             end
 
-            local function ApplyValue(NewVal, FireCallback)
-                CurrentValue = RoundStep(NewVal)
+            local function ApplyValue(NewVal, FireCallback, Instant)
+                if FireCallback and Flag and ApplyingFlags[Flag] then
+                    return
+                end
+                local Num = tonumber(NewVal)
+                if not Num or Num ~= Num or Num == math.huge or Num == -math.huge then
+                    return
+                end
+                local PrevValue = CurrentValue
+                CurrentValue = RoundStep(Num)
                 local Ratio = (Max > Min) and ((CurrentValue - Min) / (Max - Min)) or 0
-                Tween(Fill, { Size = UDim2.new(Ratio, 0, 1, 0) }, 0.08)
-                Tween(Knob, { Position = UDim2.new(Ratio, 0, 0.5, 0) }, 0.08)
-                Tween(SliderGlow, { Position = UDim2.new(Ratio, 0, 0.5, 0) }, 0.08)
-
                 local TextOut = tostring(CurrentValue) .. Suffix
                 ValueLabel.Text = TextOut
                 local BadgeW = math.max(36, #TextOut * 7 + 16)
-                Tween(ValueBadge, { Size = UDim2.new(0, BadgeW, 0, 24) }, 0.1)
+
+                if Instant then
+                    Fill.Size = UDim2.new(Ratio, 0, 1, 0)
+                    Knob.Position = UDim2.new(Ratio, 0, 0.5, 0)
+                    SliderGlow.Position = UDim2.new(Ratio, 0, 0.5, 0)
+                    ValueBadge.Size = UDim2.new(0, BadgeW, 0, 24)
+                else
+                    Tween(Fill, { Size = UDim2.new(Ratio, 0, 1, 0) }, 0.08)
+                    Tween(Knob, { Position = UDim2.new(Ratio, 0, 0.5, 0) }, 0.08)
+                    Tween(SliderGlow, { Position = UDim2.new(Ratio, 0, 0.5, 0) }, 0.08)
+                    Tween(ValueBadge, { Size = UDim2.new(0, BadgeW, 0, 24) }, 0.1)
+                end
 
                 if FireCallback then
-                    SafeCallback(Callback, CurrentValue)
+                    RunFlagCallback(Flag, Callback, CurrentValue)
+                    if PrevValue ~= CurrentValue and not IsLoadingConfig then
+                        NotifyConfigChange(Flag)
+                    end
                 end
             end
 
-            ApplyValue(CurrentValue, false)
+            ApplyValue(CurrentValue, false, true)
 
             local Dragging = false
             local function UpdateFromScreenX(ScreenX)
@@ -2261,11 +2926,31 @@ function SairyLib:CreateWindow(WindowConfig)
                 ValueBox.Text = tostring(CurrentValue)
             end)
 
-            return {
-                Set = function(_, V) ApplyValue(V, true) end,
+            RegisterConfigElement(Flag, {
+                Type = "Slider",
+                Get = function() return CurrentValue end,
+                Serialize = function() return CurrentValue end,
+                GetDefault = function() return RoundStep(DefaultVal) end,
+                Apply = function(LoadedVal, FireCallback)
+                    local Num = tonumber(LoadedVal)
+                    if not Num or Num ~= Num or Num == math.huge or Num == -math.huge then
+                        return false
+                    end
+                    ApplyValue(Num, FireCallback ~= false, true)
+                    return true
+                end
+            })
+
+            local SliderHandle
+            SliderHandle = {
+                Set = function(FirstArg, SecondArg)
+                    local TargetVal = (FirstArg == SliderHandle) and SecondArg or FirstArg
+                    ApplyValue(TargetVal, true)
+                end,
                 Get = function() return CurrentValue end,
                 Instance = SliderCard
             }
+            return SliderHandle
         end
 
         -- SairyLib Dropdown (Authentic Searchable Card)
@@ -2273,6 +2958,7 @@ function SairyLib:CreateWindow(WindowConfig)
             DropdownConfig = DropdownConfig or {}
             local Title = DropdownConfig.Title or "Dropdown"
             local Desc = DropdownConfig.Desc or ""
+            local Flag = DropdownConfig.Flag
             local Values = DropdownConfig.Values or {}
             local Multi = DropdownConfig.Multi == true
             local RawDefault = DropdownConfig.Default
@@ -2291,6 +2977,7 @@ function SairyLib:CreateWindow(WindowConfig)
             else
                 Selected = RawDefault ~= nil and RawDefault or Values[1]
             end
+            local DefaultSelection = Multi and table.clone(Selected) or Selected
             local Callback = DropdownConfig.Callback or function() end
             local IsOpen = false
 
@@ -2577,6 +3264,9 @@ function SairyLib:CreateWindow(WindowConfig)
                         end)
 
                         ItemBtn.MouseButton1Click:Connect(function()
+                            if Flag and ApplyingFlags[Flag] then
+                                return
+                            end
                             if Multi then
                                 local FoundIdx = table.find(Selected, Item)
                                 local NowSelected
@@ -2591,13 +3281,18 @@ function SairyLib:CreateWindow(WindowConfig)
                                 Tween(ItemBtn, { BackgroundTransparency = NowSelected and 0 or 1 }, 0.12)
                                 Tween(ItemLabel, { TextColor3 = NowSelected and SairyColors.TextPrimary or SairyColors.TextSecondary }, 0.12)
                                 ValueText.Text = FormatSelected()
-                                SafeCallback(Callback, table.clone(Selected))
+                                RunFlagCallback(Flag, Callback, table.clone(Selected))
+                                NotifyConfigChange(Flag)
                             else
+                                local PrevSelected = Selected
                                 Selected = Item
                                 ToggleDropdown()
                                 RenderList(DropSearchBox.Text)
                                 ValueText.Text = FormatSelected()
-                                SafeCallback(Callback, Selected)
+                                RunFlagCallback(Flag, Callback, Selected)
+                                if PrevSelected ~= Selected then
+                                    NotifyConfigChange(Flag)
+                                end
                             end
                         end)
                     end
@@ -2613,9 +3308,41 @@ function SairyLib:CreateWindow(WindowConfig)
                 RenderList(DropSearchBox.Text)
             end)
 
-            return {
-                Set = function(_, NewVal)
-                    if Multi then
+            local function ResolveDropdownItem(Candidate)
+                local CandidateType = type(Candidate)
+                if CandidateType ~= "string" and CandidateType ~= "number" and CandidateType ~= "boolean" then
+                    return false, nil
+                end
+                if #Values == 0 then
+                    return true, Candidate
+                end
+                for _, Item in ipairs(Values) do
+                    if Item == Candidate or tostring(Item) == tostring(Candidate) then
+                        return true, Item
+                    end
+                end
+                return false, nil
+            end
+
+            local function SetSelection(NewVal, FireCallback, FromConfig)
+                if Flag and ApplyingFlags[Flag] then
+                    return false
+                end
+                local PrevSelection = Multi and table.clone(Selected) or Selected
+                if Multi then
+                    if FromConfig then
+                        if type(NewVal) ~= "table" or (next(NewVal) ~= nil and #NewVal == 0) then
+                            return false
+                        end
+                        local Validated = {}
+                        for _, Candidate in ipairs(NewVal) do
+                            local OkItem, Matched = ResolveDropdownItem(Candidate)
+                            if OkItem and not table.find(Validated, Matched) then
+                                table.insert(Validated, Matched)
+                            end
+                        end
+                        Selected = Validated
+                    else
                         if type(NewVal) == "table" then
                             Selected = table.clone(NewVal)
                         elseif NewVal ~= nil then
@@ -2623,12 +3350,51 @@ function SairyLib:CreateWindow(WindowConfig)
                         else
                             Selected = {}
                         end
+                    end
+                else
+                    if FromConfig then
+                        local OkItem, Matched = ResolveDropdownItem(NewVal)
+                        if not OkItem then
+                            return false
+                        end
+                        Selected = Matched
                     else
                         Selected = NewVal
                     end
-                    ValueText.Text = FormatSelected()
-                    RenderList(DropSearchBox.Text)
-                    SafeCallback(Callback, Multi and table.clone(Selected) or Selected)
+                end
+
+                ValueText.Text = FormatSelected()
+                RenderList(DropSearchBox.Text)
+                if FireCallback ~= false then
+                    RunFlagCallback(Flag, Callback, Multi and table.clone(Selected) or Selected)
+                end
+                if not DeepEqual(PrevSelection, Selected) and not IsLoadingConfig then
+                    NotifyConfigChange(Flag)
+                end
+                return true
+            end
+
+            RegisterConfigElement(Flag, {
+                Type = "Dropdown",
+                Get = function()
+                    return Multi and table.clone(Selected) or Selected
+                end,
+                Serialize = function()
+                    return Multi and table.clone(Selected) or Selected
+                end,
+                GetDefault = function()
+                    return Multi and table.clone(DefaultSelection) or DefaultSelection
+                end,
+                Apply = function(LoadedVal, FireCallback)
+                    return SetSelection(LoadedVal, FireCallback ~= false, true)
+                end
+            })
+
+            local DropdownHandle
+            DropdownHandle = {
+                Set = function(FirstArg, SecondArg)
+                    local TargetVal = (FirstArg == DropdownHandle) and SecondArg or FirstArg
+                    SetSelection(TargetVal, true, false)
                 end,
                 Refresh = function(_, NewVals)
                     Values = NewVals or {}
@@ -2639,6 +3405,7 @@ function SairyLib:CreateWindow(WindowConfig)
                 end,
                 Instance = DropdownCard
             }
+            return DropdownHandle
         end
 
         -- SairyLib Input Card (Card with Input Box)
@@ -2646,7 +3413,9 @@ function SairyLib:CreateWindow(WindowConfig)
             InputConfig = InputConfig or {}
             local Title = InputConfig.Title or "Input"
             local Desc = InputConfig.Desc or ""
+            local Flag = InputConfig.Flag
             local Default = tostring(InputConfig.Default or "")
+            local LastCommittedText = Default
             local Placeholder = InputConfig.Placeholder or "Enter value..."
             local Callback = InputConfig.Callback or function() end
 
@@ -2731,16 +3500,56 @@ function SairyLib:CreateWindow(WindowConfig)
             end)
             TextBox.FocusLost:Connect(function(EnterPressed)
                 Tween(BoxStroke, { Color = SairyColors.StrokeBorder }, 0.14)
-                SafeCallback(Callback, TextBox.Text, EnterPressed)
+                if Flag and ApplyingFlags[Flag] then
+                    return
+                end
+                local PrevText = LastCommittedText
+                LastCommittedText = TextBox.Text
+                RunFlagCallback(Flag, Callback, TextBox.Text, EnterPressed)
+                if PrevText ~= TextBox.Text and not IsLoadingConfig then
+                    NotifyConfigChange(Flag)
+                end
             end)
 
-            return {
-                Set = function(_, Txt)
-                    TextBox.Text = tostring(Txt)
-                    SafeCallback(Callback, TextBox.Text, true)
+            local function SetInputText(Txt, FireCallback)
+                if Flag and ApplyingFlags[Flag] then
+                    return
+                end
+                local PrevText = LastCommittedText
+                TextBox.Text = tostring(Txt)
+                LastCommittedText = TextBox.Text
+                if FireCallback ~= false then
+                    RunFlagCallback(Flag, Callback, TextBox.Text, true)
+                end
+                if PrevText ~= TextBox.Text and not IsLoadingConfig then
+                    NotifyConfigChange(Flag)
+                end
+            end
+
+            RegisterConfigElement(Flag, {
+                Type = "Input",
+                Get = function() return TextBox.Text end,
+                Serialize = function() return TextBox.Text end,
+                GetDefault = function() return Default end,
+                Apply = function(LoadedVal, FireCallback)
+                    if type(LoadedVal) ~= "string" and type(LoadedVal) ~= "number" then
+                        return false
+                    end
+                    SetInputText(tostring(LoadedVal), FireCallback ~= false)
+                    return true
+                end
+            })
+
+            local InputHandle
+            InputHandle = {
+                Set = function(FirstArg, SecondArg)
+                    local TargetVal = (FirstArg == InputHandle) and SecondArg or FirstArg
+                    SetInputText(TargetVal, true)
                 end,
-                Get = function() return TextBox.Text end
+                Get = function() return TextBox.Text end,
+                Instance = InputCard
             }
+            return InputHandle
         end
 
         -- SairyLib Keybind Card
@@ -2748,7 +3557,9 @@ function SairyLib:CreateWindow(WindowConfig)
             KeybindConfig = KeybindConfig or {}
             local Title = KeybindConfig.Title or "Keybind"
             local Desc = KeybindConfig.Desc or ""
-            local CurrentKey = KeybindConfig.Default or Enum.KeyCode.RightControl
+            local Flag = KeybindConfig.Flag
+            local DefaultKey = ResolveKeyCode(KeybindConfig.Default) or Enum.KeyCode.RightControl
+            local CurrentKey = DefaultKey
             local Callback = KeybindConfig.Callback or function() end
 
             local KeyCard = Instance.new("Frame")
@@ -2826,24 +3637,56 @@ function SairyLib:CreateWindow(WindowConfig)
                 Tween(KeyStroke, { Color = SairyColors.Accent }, 0.12)
             end)
 
+            local function ApplyKey(NewKey, FireCallback)
+                if Flag and ApplyingFlags[Flag] then
+                    return false
+                end
+                local Resolved = ResolveKeyCode(NewKey)
+                if not Resolved then
+                    return false
+                end
+                local PrevKey = CurrentKey
+                CurrentKey = Resolved
+                KeyPill.Text = FormatKeyName(CurrentKey)
+                if FireCallback ~= false then
+                    RunFlagCallback(Flag, Callback, CurrentKey)
+                end
+                if PrevKey ~= CurrentKey and not IsLoadingConfig then
+                    NotifyConfigChange(Flag)
+                end
+                return true
+            end
+
             TrackConnection(UserInputService.InputBegan:Connect(function(Input)
                 if Listening and Input.UserInputType == Enum.UserInputType.Keyboard and Input.KeyCode ~= Enum.KeyCode.Unknown then
                     Listening = false
-                    CurrentKey = Input.KeyCode
-                    KeyPill.Text = FormatKeyName(CurrentKey)
                     Tween(KeyStroke, { Color = SairyColors.StrokeBorder }, 0.14)
-                    SafeCallback(Callback, CurrentKey)
+                    ApplyKey(Input.KeyCode, true)
                 end
             end))
 
-            return {
-                Set = function(_, NewKey)
-                    CurrentKey = NewKey
-                    KeyPill.Text = FormatKeyName(NewKey)
-                    SafeCallback(Callback, CurrentKey)
+            RegisterConfigElement(Flag, {
+                Type = "Keybind",
+                Get = function() return CurrentKey end,
+                Serialize = function()
+                    return (typeof(CurrentKey) == "EnumItem") and CurrentKey.Name or tostring(CurrentKey)
                 end,
-                Get = function() return CurrentKey end
+                GetDefault = function() return DefaultKey end,
+                Apply = function(LoadedVal, FireCallback)
+                    return ApplyKey(LoadedVal, FireCallback ~= false)
+                end
+            })
+
+            local KeybindHandle
+            KeybindHandle = {
+                Set = function(FirstArg, SecondArg)
+                    local TargetVal = (FirstArg == KeybindHandle) and SecondArg or FirstArg
+                    ApplyKey(TargetVal, true)
+                end,
+                Get = function() return CurrentKey end,
+                Instance = KeyCard
             }
+            return KeybindHandle
         end
 
         -- SairyLib Button (Exact Authentic Card + Clean 16x16 Right Icon + Click Flash)
